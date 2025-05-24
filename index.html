@@ -7,46 +7,14 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script type="module">
-        // Firebase SDK imports
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { 
-            getAuth, 
-            signInAnonymously, 
-            onAuthStateChanged,
-            signInWithCustomToken 
-        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { 
-            getFirestore, 
-            collection, 
-            addDoc, 
-            getDoc, // Ensure getDoc is imported
-            doc, 
-            updateDoc, 
-            deleteDoc, 
-            onSnapshot,
-            query,
-            setLogLevel
-        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-
-        // --- Firebase Configuration ---
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : { apiKey: "YOUR_API_KEY", authDomain: "YOUR_AUTH_DOMAIN", projectId: "YOUR_PROJECT_ID" }; 
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-car-app-gemini';
-
-        // --- Initialize Firebase ---
-        let app;
-        let db;
-        let auth;
-        let userId;
-
         // --- DOM Elements ---
         const carForm = document.getElementById('carForm');
         const carList = document.getElementById('carList');
         const formTitle = document.getElementById('formTitle');
         const submitButton = document.getElementById('submitButton');
-        const carIdField = document.getElementById('carId');
-        const loadingIndicator = document.getElementById('loadingIndicator');
-        const authStatus = document.getElementById('authStatus');
-        const userIdDisplay = document.getElementById('userIdDisplay');
+        const carIdField = document.getElementById('carId'); // Hidden field for ID
+        const loadingIndicator = document.getElementById('loadingIndicator'); // General loading
+        const appStatus = document.getElementById('appStatus'); // For general app status messages
         const messageContainer = document.getElementById('messageContainer');
         const messageText = document.getElementById('messageText');
         const closeMessageButton = document.getElementById('closeMessageButton');
@@ -58,43 +26,55 @@
 
         // --- App State ---
         let editingCarId = null; 
+        const LOCAL_STORAGE_KEY = 'myCarsApp_cars';
 
         // --- Utility Functions ---
-        function showMessage(message, type = 'info') { // Default to 'info' (blue)
+        function showMessage(message, type = 'info') { 
+            if (!messageText || !messageContainer) return;
             messageText.textContent = message;
             messageContainer.classList.remove('hidden', 'bg-green-500', 'bg-red-500', 'bg-blue-500');
             if (type === 'success') {
                 messageContainer.classList.add('bg-green-500');
             } else if (type === 'error') {
                 messageContainer.classList.add('bg-red-500');
-            } else { // 'info' or any other
+            } else { 
                 messageContainer.classList.add('bg-blue-500');
             }
             messageContainer.classList.remove('hidden');
         }
 
         function hideMessage() {
-            messageContainer.classList.add('hidden');
+            if (messageContainer) messageContainer.classList.add('hidden');
         }
         
-        // --- Firestore Functions ---
-        function getCarCollectionPath() {
-            if (!userId) {
-                console.error("User ID is not available. Cannot determine collection path.");
-                return null; 
+        // --- Local Storage Functions ---
+        function getCarsFromLocalStorage() {
+            const carsJSON = localStorage.getItem(LOCAL_STORAGE_KEY);
+            try {
+                return carsJSON ? JSON.parse(carsJSON) : [];
+            } catch (error) {
+                console.error("Error parsing cars from local storage:", error);
+                showMessage("Error loading saved cars. Data might be corrupted.", "error");
+                return []; // Return empty array on error to prevent app crash
             }
-            return `artifacts/${appId}/users/${userId}/cars`;
         }
 
+        function saveCarsToLocalStorage(cars) {
+            try {
+                localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(cars));
+            } catch (error) {
+                console.error("Error saving cars to local storage:", error);
+                showMessage("Could not save car data. Local storage might be full or disabled.", "error");
+            }
+        }
+
+        // Save or Update Car
         async function saveCar(event) {
             event.preventDefault();
-            if (!userId) {
-                showMessage("User not authenticated. Please wait or refresh.", "error");
-                return;
-            }
-            
-            loadingIndicator.classList.remove('hidden');
+            if (loadingIndicator) loadingIndicator.classList.remove('hidden');
+
             const carData = {
+                id: editingCarId || crypto.randomUUID(), // Generate new ID if not editing
                 make: carForm.make.value,
                 model: carForm.model.value,
                 year: carForm.year.value,
@@ -107,155 +87,123 @@
                 notes: carForm.notes.value,
             };
 
-            try {
-                const carCollectionPath = getCarCollectionPath();
-                if (!carCollectionPath) {
-                    loadingIndicator.classList.add('hidden');
-                    return;
-                }
-
-                if (editingCarId) {
-                    const carRef = doc(db, carCollectionPath, editingCarId);
-                    await updateDoc(carRef, carData);
-                    showMessage('Car information updated successfully!', 'success');
-                } else {
-                    await addDoc(collection(db, carCollectionPath), carData);
-                    showMessage('Car information saved successfully!', 'success');
-                }
-                carForm.reset();
-                editingCarId = null;
-                formTitle.textContent = 'Add New Car';
-                submitButton.textContent = 'Save Car';
-                carIdField.value = '';
-            } catch (error) {
-                console.error("Error saving car: ", error);
-                showMessage(`Error saving car: ${error.message}`, 'error');
-            } finally {
-                loadingIndicator.classList.add('hidden');
+            let cars = getCarsFromLocalStorage();
+            if (editingCarId) {
+                // Update existing car
+                cars = cars.map(car => car.id === editingCarId ? carData : car);
+                showMessage('Car information updated successfully!', 'success');
+            } else {
+                // Add new car
+                cars.push(carData);
+                showMessage('Car information saved successfully!', 'success');
             }
+            saveCarsToLocalStorage(cars);
+            
+            fetchAndDisplayCars(); // Refresh the list
+
+            carForm.reset();
+            editingCarId = null;
+            if(formTitle) formTitle.textContent = 'Add New Car';
+            if(submitButton) submitButton.textContent = 'Save Car';
+            if(carIdField) carIdField.value = '';
+            if (loadingIndicator) loadingIndicator.classList.add('hidden');
         }
 
+        // Fetch and Display Cars
         function fetchAndDisplayCars() {
-            if (!auth || !db || !userId) return;
-            
-            loadingIndicator.classList.remove('hidden');
-            const carCollectionPath = getCarCollectionPath();
-            if (!carCollectionPath) {
-                 loadingIndicator.classList.add('hidden');
-                 return;
-            }
-
-            const q = query(collection(db, carCollectionPath));
-
-            onSnapshot(q, (querySnapshot) => {
-                carList.innerHTML = ''; 
-                if (querySnapshot.empty) {
-                    carList.innerHTML = '<p class="text-gray-500 col-span-full text-center">No cars saved yet. Add your first car!</p>';
-                } else {
-                    querySnapshot.forEach((docSnapshot) => {
-                        const car = docSnapshot.data();
-                        const carId = docSnapshot.id;
-                        const carElement = document.createElement('div');
-                        carElement.className = 'bg-white p-6 rounded-lg shadow-lg hover:shadow-xl transition-shadow duration-300';
-                        carElement.innerHTML = `
-                            <h3 class="text-xl font-semibold text-indigo-700 mb-2">${car.make || ''} ${car.model || ''} (${car.year || 'N/A'})</h3>
-                            <p class="text-sm text-gray-600 mb-1"><strong>VIN:</strong> ${car.vin || 'N/A'}</p>
-                            <p class="text-sm text-gray-600 mb-1"><strong>License Plate:</strong> ${car.licensePlate || 'N/A'}</p>
-                            <p class="text-sm text-gray-600 mb-1"><strong>Insurance Policy:</strong> ${car.insurancePolicy || 'N/A'}</p>
-                            <p class="text-sm text-gray-600 mb-1"><strong>Insurance Expiry:</strong> ${car.insuranceExpiry ? new Date(car.insuranceExpiry).toLocaleDateString() : 'N/A'}</p>
-                            <p class="text-sm text-gray-600 mb-1"><strong>Last Maintenance:</strong> ${car.maintenanceDate ? new Date(car.maintenanceDate).toLocaleDateString() : 'N/A'}</p>
-                            <p class="text-sm text-gray-600 mb-1"><strong>Maintenance Details:</strong> ${car.maintenanceDetails || 'N/A'}</p>
-                            <p class="text-sm text-gray-500 mt-2"><strong>Notes:</strong> ${car.notes || 'N/A'}</p>
-                            <div class="mt-4 flex space-x-2 flex-wrap gap-2">
-                                <button data-id="${carId}" class="edit-btn bg-blue-500 hover:bg-blue-600 text-white py-2 px-4 rounded-md text-sm transition-colors">Edit</button>
-                                <button data-id="${carId}" class="delete-btn bg-red-500 hover:bg-red-600 text-white py-2 px-4 rounded-md text-sm transition-colors">Delete</button>
-                                <button data-id="${carId}" class="gemini-tips-btn bg-purple-500 hover:bg-purple-600 text-white py-2 px-4 rounded-md text-sm transition-colors">✨ Get Maintenance Tips</button>
-                            </div>
-                        `;
-                        carList.appendChild(carElement);
-                    });
-                }
-                loadingIndicator.classList.add('hidden');
-            }, (error) => {
-                console.error("Error fetching cars: ", error);
-                showMessage(`Error fetching cars: ${error.message}`, 'error');
-                loadingIndicator.classList.add('hidden');
-                carList.innerHTML = '<p class="text-red-500 col-span-full text-center">Could not load car data. Please try again later.</p>';
-            });
-        }
-
-        async function editCar(id) { 
-            if (!userId) return;
-            const carCollectionPath = getCarCollectionPath();
-            if (!carCollectionPath) return;
-            
-            const carDocRef = doc(db, carCollectionPath, id);
-            try {
-                const docSnap = await getDoc(carDocRef); 
-                if (docSnap.exists()) {
-                    const data = docSnap.data();
-                    carForm.make.value = data.make || '';
-                    carForm.model.value = data.model || '';
-                    carForm.year.value = data.year || '';
-                    carForm.vin.value = data.vin || '';
-                    carForm.licensePlate.value = data.licensePlate || '';
-                    carForm.insurancePolicy.value = data.insurancePolicy || '';
-                    carForm.insuranceExpiry.value = data.insuranceExpiry || '';
-                    carForm.maintenanceDate.value = data.maintenanceDate || '';
-                    carForm.maintenanceDetails.value = data.maintenanceDetails || '';
-                    carForm.notes.value = data.notes || '';
-                    
-                    editingCarId = id;
-                    carIdField.value = id; 
-                    formTitle.textContent = 'Edit Car Information';
-                    submitButton.textContent = 'Update Car';
-                    window.scrollTo(0, 0); 
-                } else {
-                    showMessage("Car not found for editing.", "error");
-                }
-            } catch (error) {
-                showMessage("Error fetching car details for editing: " + error.message, "error");
-                console.error("Error fetching car for edit:", error);
-            }
-        }
-
-        async function deleteCar(id) {
-            if (!userId) {
-                showMessage("User not authenticated.", "error");
+            if (loadingIndicator) loadingIndicator.classList.remove('hidden');
+            if (!carList) {
+                console.error("Car list element not found");
+                if (loadingIndicator) loadingIndicator.classList.add('hidden');
                 return;
             }
+
+            const cars = getCarsFromLocalStorage();
+            carList.innerHTML = ''; 
+            if (cars.length === 0) {
+                carList.innerHTML = '<p class="text-gray-500 col-span-full text-center">No cars saved yet. Add your first car!</p>';
+            } else {
+                cars.forEach((car) => {
+                    const carElement = document.createElement('div');
+                    carElement.className = 'bg-white p-6 rounded-lg shadow-lg hover:shadow-xl transition-shadow duration-300';
+                    carElement.innerHTML = `
+                        <h3 class="text-xl font-semibold text-indigo-700 mb-2">${car.make || ''} ${car.model || ''} (${car.year || 'N/A'})</h3>
+                        <p class="text-sm text-gray-600 mb-1"><strong>VIN:</strong> ${car.vin || 'N/A'}</p>
+                        <p class="text-sm text-gray-600 mb-1"><strong>License Plate:</strong> ${car.licensePlate || 'N/A'}</p>
+                        <p class="text-sm text-gray-600 mb-1"><strong>Insurance Policy:</strong> ${car.insurancePolicy || 'N/A'}</p>
+                        <p class="text-sm text-gray-600 mb-1"><strong>Insurance Expiry:</strong> ${car.insuranceExpiry ? new Date(car.insuranceExpiry).toLocaleDateString() : 'N/A'}</p>
+                        <p class="text-sm text-gray-600 mb-1"><strong>Last Maintenance:</strong> ${car.maintenanceDate ? new Date(car.maintenanceDate).toLocaleDateString() : 'N/A'}</p>
+                        <p class="text-sm text-gray-600 mb-1"><strong>Maintenance Details:</strong> ${car.maintenanceDetails || 'N/A'}</p>
+                        <p class="text-sm text-gray-500 mt-2"><strong>Notes:</strong> ${car.notes || 'N/A'}</p>
+                        <div class="mt-4 flex space-x-2 flex-wrap gap-2">
+                            <button data-id="${car.id}" class="edit-btn bg-blue-500 hover:bg-blue-600 text-white py-2 px-4 rounded-md text-sm transition-colors">Edit</button>
+                            <button data-id="${car.id}" class="delete-btn bg-red-500 hover:bg-red-600 text-white py-2 px-4 rounded-md text-sm transition-colors">Delete</button>
+                            <button data-id="${car.id}" class="gemini-tips-btn bg-purple-500 hover:bg-purple-600 text-white py-2 px-4 rounded-md text-sm transition-colors">✨ Get Maintenance Tips</button>
+                        </div>
+                    `;
+                    carList.appendChild(carElement);
+                });
+            }
+            if (loadingIndicator) loadingIndicator.classList.add('hidden');
+        }
+
+        // Edit Car
+        function editCar(id) { 
+            const cars = getCarsFromLocalStorage();
+            const carToEdit = cars.find(car => car.id === id);
+
+            if (carToEdit) {
+                carForm.make.value = carToEdit.make || '';
+                carForm.model.value = carToEdit.model || '';
+                carForm.year.value = carToEdit.year || '';
+                carForm.vin.value = carToEdit.vin || '';
+                carForm.licensePlate.value = carToEdit.licensePlate || '';
+                carForm.insurancePolicy.value = carToEdit.insurancePolicy || '';
+                carForm.insuranceExpiry.value = carToEdit.insuranceExpiry || '';
+                carForm.maintenanceDate.value = carToEdit.maintenanceDate || '';
+                carForm.maintenanceDetails.value = carToEdit.maintenanceDetails || '';
+                carForm.notes.value = carToEdit.notes || '';
+                
+                editingCarId = id;
+                if(carIdField) carIdField.value = id; 
+                if(formTitle) formTitle.textContent = 'Edit Car Information';
+                if(submitButton) submitButton.textContent = 'Update Car';
+                window.scrollTo(0, 0); 
+            } else {
+                showMessage("Car not found for editing.", "error");
+            }
+        }
+
+        // Delete Car
+        async function deleteCar(id) {
             const confirmDeleteModal = document.getElementById('confirmDeleteModal');
             const confirmDeleteBtn = document.getElementById('confirmDeleteBtn');
             const cancelDeleteBtn = document.getElementById('cancelDeleteBtn');
             
             if (!confirmDeleteModal || !confirmDeleteBtn || !cancelDeleteBtn) {
                 console.error("Delete confirmation modal elements not found.");
-                // Fallback for safety, though elements should exist.
-                const carCollectionPath = getCarCollectionPath();
-                if (!carCollectionPath) return;
-                const carRef = doc(db, carCollectionPath, id);
-                await deleteDoc(carRef);
+                // Fallback: directly delete if modal elements are missing
+                let cars = getCarsFromLocalStorage();
+                cars = cars.filter(car => car.id !== id);
+                saveCarsToLocalStorage(cars);
+                fetchAndDisplayCars();
                 showMessage('Car information deleted (modal error).', 'success');
                 return;
             }
             
             confirmDeleteModal.classList.remove('hidden');
 
-            confirmDeleteBtn.onclick = async () => {
+            confirmDeleteBtn.onclick = () => { // No need for async here for local storage
                 confirmDeleteModal.classList.add('hidden');
-                loadingIndicator.classList.remove('hidden');
-                try {
-                    const carCollectionPath = getCarCollectionPath();
-                    if (!carCollectionPath) { loadingIndicator.classList.add('hidden'); return; }
-                    const carRef = doc(db, carCollectionPath, id);
-                    await deleteDoc(carRef);
-                    showMessage('Car information deleted successfully!', 'success');
-                } catch (error) {
-                    console.error("Error deleting car: ", error);
-                    showMessage(`Error deleting car: ${error.message}`, 'error');
-                } finally {
-                    loadingIndicator.classList.add('hidden');
-                }
+                if (loadingIndicator) loadingIndicator.classList.remove('hidden');
+                
+                let cars = getCarsFromLocalStorage();
+                cars = cars.filter(car => car.id !== id);
+                saveCarsToLocalStorage(cars);
+                fetchAndDisplayCars(); // Refresh list
+                
+                showMessage('Car information deleted successfully!', 'success');
+                if (loadingIndicator) loadingIndicator.classList.add('hidden');
             };
 
             cancelDeleteBtn.onclick = () => {
@@ -266,7 +214,7 @@
         // --- Gemini API Functions ---
         async function callGeminiAPI(promptText) {
             if (geminiLoadingIndicator) geminiLoadingIndicator.classList.remove('hidden');
-            if (geminiResponseContent) geminiResponseContent.textContent = ''; // Clear previous content
+            if (geminiResponseContent) geminiResponseContent.innerHTML = ''; // Clear previous content, use innerHTML for safety
 
             let chatHistory = [{ role: "user", parts: [{ text: promptText }] }];
             const payload = { contents: chatHistory };
@@ -298,45 +246,34 @@
             } catch (error) {
                 console.error("Error calling Gemini API:", error);
                 showMessage(`Error getting suggestions: ${error.message}`, 'error');
-                return null; // Return null or specific error message to display
+                return null; 
             } finally {
                  if (geminiLoadingIndicator) geminiLoadingIndicator.classList.add('hidden');
             }
         }
 
         async function getMaintenanceTipsForCar(carId) {
-            if (!userId) {
-                showMessage("User not authenticated.", "error");
-                return;
-            }
-            const carCollectionPath = getCarCollectionPath();
-            if (!carCollectionPath) return;
+            const cars = getCarsFromLocalStorage();
+            const car = cars.find(c => c.id === carId);
 
-            const carDocRef = doc(db, carCollectionPath, carId);
-            try {
-                const docSnap = await getDoc(carDocRef);
-                if (docSnap.exists()) {
-                    const car = docSnap.data();
-                    const prompt = `Provide general maintenance tips and common things to watch out for a ${car.year || ''} ${car.make || ''} ${car.model || ''}. Current maintenance details: ${car.maintenanceDetails || 'None provided'}. Focus on actionable advice for a car owner.`;
-                    
-                    if (geminiResponseModal) geminiResponseModal.classList.remove('hidden');
-                    if (geminiResponseContent) geminiResponseContent.textContent = 'Getting tips...';
-                    
-                    const tips = await callGeminiAPI(prompt);
-                    if (tips && geminiResponseContent) {
-                        geminiResponseContent.textContent = tips;
-                    } else if (geminiResponseContent) {
-                        geminiResponseContent.textContent = 'Could not retrieve tips at this time.';
-                    }
-                } else {
-                    showMessage("Car details not found.", "error");
+            if (car) {
+                const prompt = `Provide general maintenance tips and common things to watch out for a ${car.year || ''} ${car.make || ''} ${car.model || ''}. Current maintenance details: ${car.maintenanceDetails || 'None provided'}. Focus on actionable advice for a car owner. Format the response clearly, perhaps with bullet points or short paragraphs.`;
+                
+                if (geminiResponseModal) geminiResponseModal.classList.remove('hidden');
+                if (geminiResponseContent) geminiResponseContent.innerHTML = 'Getting tips...'; // Use innerHTML
+                if (geminiLoadingIndicator) geminiLoadingIndicator.classList.remove('hidden');
+
+
+                const tips = await callGeminiAPI(prompt);
+                if (tips && geminiResponseContent) {
+                    geminiResponseContent.innerHTML = tips.replace(/\n/g, '<br>'); // Basic formatting for newlines
+                } else if (geminiResponseContent) {
+                    geminiResponseContent.innerHTML = 'Could not retrieve tips at this time.';
                 }
-            } catch (error) {
-                showMessage("Error fetching car details for tips: " + error.message, "error");
-                console.error("Error in getMaintenanceTipsForCar:", error);
-                if (geminiResponseContent) geminiResponseContent.textContent = 'Error fetching tips.';
-                if (geminiLoadingIndicator) geminiLoadingIndicator.classList.add('hidden');
+            } else {
+                showMessage("Car details not found.", "error");
             }
+             if (geminiLoadingIndicator) geminiLoadingIndicator.classList.add('hidden');
         }
 
         async function elaborateMaintenanceDetails() {
@@ -345,17 +282,21 @@
                 showMessage("Please enter some maintenance details first to elaborate.", "info");
                 return;
             }
-            const prompt = `I'm logging maintenance for my car. Here are my current notes: "${currentDetails}". Can you help me elaborate on these details? Suggest what other specific tasks might be related, common observations to note, or how to make these notes more comprehensive for future reference.`;
+            const prompt = `I'm logging maintenance for my car. Here are my current notes: "${currentDetails}". Can you help me elaborate on these details? Suggest what other specific tasks might be related, common observations to note, or how to make these notes more comprehensive for future reference. Format the response clearly.`;
             
             if (geminiResponseModal) geminiResponseModal.classList.remove('hidden');
-            if (geminiResponseContent) geminiResponseContent.textContent = 'Elaborating details...';
+            if (geminiResponseContent) geminiResponseContent.innerHTML = 'Elaborating details...';
+            if (geminiLoadingIndicator) geminiLoadingIndicator.classList.remove('hidden');
 
             const elaboratedText = await callGeminiAPI(prompt);
             if (elaboratedText && geminiResponseContent) {
-                geminiResponseContent.innerHTML = `<strong>Original:</strong><p class="mb-2 p-2 border rounded bg-gray-50">${currentDetails}</p><strong>✨ Suggestions:</strong><p class="mt-1 p-2 border rounded bg-gray-50">${elaboratedText.replace(/\n/g, '<br>')}</p> <small class="block mt-2 text-xs text-gray-500">You can copy parts of this to your maintenance details field.</small>`;
+                // Sanitize currentDetails before putting it into innerHTML
+                const sanitizedCurrentDetails = currentDetails.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+                geminiResponseContent.innerHTML = `<strong>Original:</strong><p class="mb-2 p-2 border rounded bg-gray-50">${sanitizedCurrentDetails}</p><strong>✨ Suggestions:</strong><p class="mt-1 p-2 border rounded bg-gray-50">${elaboratedText.replace(/\n/g, '<br>')}</p> <small class="block mt-2 text-xs text-gray-500">You can copy parts of this to your maintenance details field.</small>`;
             } else if (geminiResponseContent) {
-                geminiResponseContent.textContent = 'Could not elaborate on the details at this time.';
+                geminiResponseContent.innerHTML = 'Could not elaborate on the details at this time.';
             }
+             if (geminiLoadingIndicator) geminiLoadingIndicator.classList.add('hidden');
         }
 
 
@@ -396,70 +337,17 @@
         if (closeGeminiModalBtn && geminiResponseModal) {
             closeGeminiModalBtn.addEventListener('click', () => {
                 geminiResponseModal.classList.add('hidden');
+                 if (geminiResponseContent) geminiResponseContent.innerHTML = ''; // Clear content on close
             });
         }
-
-
+        
         // --- Initialize App ---
-        async function initializeAppAndAuth() {
-            try {
-                app = initializeApp(firebaseConfig);
-                db = getFirestore(app);
-                auth = getAuth(app);
-                setLogLevel('debug'); 
-
-                if (authStatus) authStatus.textContent = "Authenticating...";
-
-                onAuthStateChanged(auth, async (user) => {
-                    if (user) {
-                        userId = user.uid;
-                        console.log("User authenticated with UID:", userId);
-                        if (authStatus) authStatus.textContent = "Authenticated";
-                        if (userIdDisplay) {
-                            userIdDisplay.textContent = `User ID: ${userId}`;
-                            userIdDisplay.classList.remove('hidden');
-                        }
-                        fetchAndDisplayCars(); 
-                    } else {
-                        userId = null; 
-                        if (authStatus) authStatus.textContent = "Attempting sign-in...";
-                        if (userIdDisplay) userIdDisplay.classList.add('hidden');
-                        console.log("No user signed in. Attempting sign-in.");
-                        try {
-                            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                                console.log("Attempting sign in with custom token.");
-                                await signInWithCustomToken(auth, __initial_auth_token);
-                            } else {
-                                console.log("Attempting anonymous sign in.");
-                                await signInAnonymously(auth);
-                            }
-                        } catch (error) {
-                            console.error("Firebase Authentication Error: ", error);
-                            if (authStatus) authStatus.textContent = `Authentication failed.`;
-                            showMessage(`Authentication failed: ${error.message}. Some features might not work.`, "error");
-                            if (!userId) { 
-                                userId = 'local-' + crypto.randomUUID();
-                                if (authStatus) authStatus.textContent = "Using local session (not synced).";
-                                if (userIdDisplay) {
-                                     userIdDisplay.textContent = `Local Session ID: ${userId.substring(0,15)}...`;
-                                     userIdDisplay.classList.remove('hidden');
-                                }
-                                console.warn("Using temporary local user ID due to auth failure:", userId);
-                                fetchAndDisplayCars(); 
-                            }
-                        }
-                    }
-                });
-
-            } catch (error) {
-                console.error("Error initializing Firebase: ", error);
-                if (authStatus) authStatus.textContent = "Firebase initialization failed.";
-                showMessage("Error initializing the application. Please try refreshing. " + error.message, "error");
-                if (loadingIndicator) loadingIndicator.classList.add('hidden');
-            }
+        function initializeApp() {
+            if (appStatus) appStatus.textContent = "App ready. Data is saved in your browser.";
+            fetchAndDisplayCars(); // Load cars from local storage on startup
         }
 
-        document.addEventListener('DOMContentLoaded', initializeAppAndAuth);
+        document.addEventListener('DOMContentLoaded', initializeApp);
 
     </script>
     <style>
@@ -479,8 +367,11 @@
         .btn-secondary {
              @apply bg-gray-200 hover:bg-gray-300 text-gray-700 font-semibold py-2 px-6 rounded-md shadow-md hover:shadow-lg transition-all duration-300 ease-in-out;
         }
-        #loadingIndicator, #geminiLoadingIndicator { /* Combined common styles */
+        #loadingIndicator { 
             @apply fixed inset-0 bg-gray-800 bg-opacity-50 flex items-center justify-center z-50;
+        }
+        #geminiLoadingIndicator { /* Specific for Gemini modal spinner */
+             @apply w-full flex justify-center items-center py-4; /* Centered within its container */
         }
         .spinner {
             @apply w-12 h-12 border-4 border-t-transparent border-blue-500 rounded-full animate-spin;
@@ -492,13 +383,14 @@
             @apply bg-white p-6 md:p-8 rounded-lg shadow-xl max-w-lg w-full mx-auto;
         }
         .message-box {
-            @apply fixed top-5 right-5 p-4 rounded-md text-white shadow-lg z-[100] transition-opacity duration-300; /* Ensure message box is on top */
+            @apply fixed top-5 right-5 p-4 rounded-md text-white shadow-lg z-[100] transition-opacity duration-300;
         }
         #geminiResponseContent {
             max-height: 60vh;
             overflow-y: auto;
-            white-space: pre-wrap; /* To respect newlines from Gemini */
+            white-space: pre-wrap; 
             word-wrap: break-word;
+            background-color: #f9fafb; /* Slightly different background for content area */
         }
     </style>
 </head>
@@ -506,10 +398,9 @@
     <div class="container mx-auto max-w-4xl">
         <header class="text-center mb-8">
             <h1 class="text-4xl font-bold text-indigo-700">Car Information Manager</h1>
-            <p class="text-gray-600 mt-2">Your smart assistant for car care, now with ✨ Gemini!</p>
-            <div id="authStatus" class="text-xs text-gray-500 mt-1">Initializing...</div>
-            <div id="userIdDisplay" class="text-xs text-gray-500 mt-1 hidden"></div>
-        </header>
+            <p class="text-gray-600 mt-2">Your smart assistant for car care, now with ✨ Gemini! (Data saved locally)</p>
+            <div id="appStatus" class="text-xs text-gray-500 mt-1">Initializing...</div>
+            </header>
 
         <div id="messageContainer" class="message-box hidden mb-4">
             <span id="messageText"></span>
@@ -617,15 +508,12 @@
                 <h3 class="text-xl font-semibold text-indigo-700">✨ Gemini Suggestions</h3>
                 <button id="closeGeminiModalBtn" class="text-gray-500 hover:text-gray-700 text-2xl">&times;</button>
             </div>
-            <div id="geminiLoadingIndicator" class="hidden">
-                 <div class="flex justify-center items-center py-4">
-                    <div class="spinner"></div> <span class="ml-3 text-gray-600">Gemini is thinking...</span>
-                 </div>
+            <div id="geminiLoadingIndicator" class="hidden"> <div class="spinner"></div> <span class="ml-3 text-gray-600">Gemini is thinking...</span>
             </div>
-            <div id="geminiResponseContent" class="text-sm text-gray-700 bg-gray-50 p-4 rounded-md border">
+            <div id="geminiResponseContent" class="text-sm text-gray-700 p-4 rounded-md border">
                 </div>
             <div class="mt-6 text-right">
-                <button id="closeGeminiModalBtnSecondary" onclick="document.getElementById('geminiResponseModal').classList.add('hidden')" class="btn-secondary">Close</button>
+                <button id="closeGeminiModalBtnSecondary" onclick="document.getElementById('geminiResponseModal').classList.add('hidden'); if(document.getElementById('geminiResponseContent')) document.getElementById('geminiResponseContent').innerHTML='';" class="btn-secondary">Close</button>
             </div>
         </div>
     </div>
